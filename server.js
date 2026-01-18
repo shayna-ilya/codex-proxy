@@ -5,9 +5,11 @@ const app = express();
 const TARGET_URL = 'https://chatgpt.com/backend-api/codex';
 
 // Middleware для парсинга JSON и других типов данных
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(express.raw({ type: '*/*', limit: '50mb' }));
+// Увеличиваем лимиты для обработки больших запросов
+app.use(express.json({ limit: '200mb' }));
+app.use(express.urlencoded({ extended: true, limit: '200mb' }));
+app.use(express.raw({ type: '*/*', limit: '200mb' }));
+app.use(express.text({ type: '*/*', limit: '200mb' }));
 
 // Проксирование всех запросов
 app.all('*', async (req, res) => {
@@ -31,13 +33,19 @@ app.all('*', async (req, res) => {
       url: targetUrl,
       headers: headers,
       validateStatus: () => true, // Принимаем все статусы ответа
+      maxBodyLength: Infinity, // Убираем лимит размера тела запроса
+      maxContentLength: Infinity, // Убираем лимит размера ответа
     };
 
     // Добавляем тело запроса, если оно есть
-    if (req.body && Object.keys(req.body).length > 0) {
-      axiosConfig.data = req.body;
-    } else if (req.body && Buffer.isBuffer(req.body)) {
-      axiosConfig.data = req.body;
+    if (req.body !== undefined && req.body !== null) {
+      if (Buffer.isBuffer(req.body) || typeof req.body === 'string') {
+        axiosConfig.data = req.body;
+      } else if (typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+        axiosConfig.data = req.body;
+      } else if (req.body !== '') {
+        axiosConfig.data = req.body;
+      }
     }
 
     // Выполняем запрос
@@ -45,7 +53,7 @@ app.all('*', async (req, res) => {
 
     // Пересылаем ответ клиенту
     res.status(response.status);
-    
+
     // Копируем заголовки ответа
     Object.keys(response.headers).forEach(key => {
       // Исключаем некоторые заголовки, которые могут вызвать проблемы
