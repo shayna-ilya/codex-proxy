@@ -1,75 +1,50 @@
 const express = require('express');
-const axios = require('axios');
+const https = require('https');
+const { URL } = require('url');
 const app = express();
 
 const TARGET_URL = 'https://chatgpt.com/backend-api/codex';
 
-// Middleware для парсинга JSON и других типов данных
-// Увеличиваем лимиты для обработки больших запросов
-app.use(express.json({ limit: '200mb' }));
-app.use(express.urlencoded({ extended: true, limit: '200mb' }));
-app.use(express.raw({ type: '*/*', limit: '200mb' }));
-app.use(express.text({ type: '*/*', limit: '200mb' }));
+const upstreamBase = new URL(TARGET_URL);
 
 // Проксирование всех запросов
-app.all('*', async (req, res) => {
-  try {
-    // Формируем целевой URL
-    const targetPath = req.path === '/' ? '' : req.path;
-    const targetUrl = `${TARGET_URL}${targetPath}${req.url.includes('?') ? req.url.substring(req.path.length) : ''}`;
+app.all('*', (req, res) => {
+  const targetPath = upstreamBase.pathname.replace(/\/$/, '') + req.originalUrl;
+  const targetUrlForLog = `${upstreamBase.origin}${targetPath}`;
 
-    console.log(`Proxying ${req.method} ${req.path} -> ${targetUrl}`);
+  console.log(`Proxying ${req.method} ${req.originalUrl} -> ${targetUrlForLog}`);
 
-    // Подготавливаем заголовки (исключаем host и другие заголовки, которые могут вызвать проблемы)
-    const headers = { ...req.headers };
-    delete headers.host;
-    delete headers['content-length'];
-    delete headers['connection'];
-    delete headers['accept-encoding'];
+  const headers = { ...req.headers };
+  headers.host = upstreamBase.host;
+  delete headers.connection;
 
-    // Опции для запроса
-    const axiosConfig = {
+  const proxyReq = https.request(
+    {
+      protocol: upstreamBase.protocol,
+      hostname: upstreamBase.hostname,
+      port: upstreamBase.port || 443,
       method: req.method,
-      url: targetUrl,
-      headers: headers,
-      validateStatus: () => true, // Принимаем все статусы ответа
-      maxBodyLength: Infinity, // Убираем лимит размера тела запроса
-      maxContentLength: Infinity, // Убираем лимит размера ответа
-    };
+      path: targetPath,
+      headers,
+    },
+    (proxyRes) => {
+      res.statusCode = proxyRes.statusCode || 502;
 
-    // Добавляем тело запроса, если оно есть
-    if (req.body !== undefined && req.body !== null) {
-      if (Buffer.isBuffer(req.body) || typeof req.body === 'string') {
-        axiosConfig.data = req.body;
-      } else if (typeof req.body === 'object' && Object.keys(req.body).length > 0) {
-        axiosConfig.data = req.body;
-      } else if (req.body !== '') {
-        axiosConfig.data = req.body;
-      }
+      Object.entries(proxyRes.headers).forEach(([key, value]) => {
+        if (value !== undefined) res.setHeader(key, value);
+      });
+
+      proxyRes.pipe(res);
     }
+  );
 
-    // Выполняем запрос
-    const response = await axios(axiosConfig);
+  proxyReq.on('error', (err) => {
+    console.error('Proxy error:', err.message);
+    if (!res.headersSent) res.status(502);
+    res.end('Bad Gateway');
+  });
 
-    // Пересылаем ответ клиенту
-    res.status(response.status);
-
-    // Копируем заголовки ответа
-    Object.keys(response.headers).forEach(key => {
-      // Исключаем некоторые заголовки, которые могут вызвать проблемы
-      if (!['content-encoding', 'transfer-encoding', 'connection'].includes(key.toLowerCase())) {
-        res.setHeader(key, response.headers[key]);
-      }
-    });
-
-    res.send(response.data);
-  } catch (error) {
-    console.error('Proxy error:', error.message);
-    res.status(500).json({
-      error: 'Proxy error',
-      message: error.message
-    });
-  }
+  req.pipe(proxyReq);
 });
 
 const PORT = process.env.PORT || 3000;
